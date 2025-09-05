@@ -2,8 +2,8 @@ import torch
 import os
 
 # Paths (dùng folder/json đã chia sẵn)
-DATA_DIR = "data/split_images"
-JSON_DIR = "data/split_json"
+DATA_DIR = "data/images"
+JSON_DIR = "data/labels.json"
 
 # Hyperparams
 IMG_SIZE = 224
