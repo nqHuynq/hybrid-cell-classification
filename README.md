@@ -12,5 +12,5 @@ cd hybrid-cell-classification
 pip install -r requirements.txt
 
 # 3. Train and evaluate (example: ConvNeXt + SPA Loss)
-python train.py --model convnext_base --loss spa --epochs 10 --batch_size 32
+python train.py --model convnext_base --loss spa --epochs 10 --batch_size 4
 python evaluate.py --model convnext_base --loss spa --threshold tuned
