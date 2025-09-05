@@ -2,6 +2,7 @@ import os
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report
+from huggingface_hub import hf_hub_download
 
 from configs import config
 from datasets.cell_dataset import CellDataset
@@ -29,12 +30,17 @@ def main():
     )
 
     # =========================
-    # LOAD MODEL
+    # LOAD MODEL FROM HF HUB
     # =========================
-    checkpoint = torch.load("best_model.pth", map_location=config.DEVICE, weights_only=False)
+    repo_id = "SoftmaxSamurai/ConvNext_SCTC"  
+    filename = "best_model.pth"
+
+    model_path = hf_hub_download(repo_id=repo_id, filename=filename)
+    checkpoint = torch.load(model_path, map_location=config.DEVICE, weights_only=False)
+
     thresholds = checkpoint["thresholds"]
 
-    model = get_convnext_model()  # 🔑 dùng cùng kiến trúc với train.py
+    model = get_convnext_model()  
     model.load_state_dict(checkpoint["model"])
     model = model.to(config.DEVICE)
 
