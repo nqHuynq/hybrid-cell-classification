@@ -3,7 +3,7 @@ import os
 
 # Paths (dùng folder/json đã chia sẵn)
 DATA_DIR = "data/images"
-JSON_DIR = "data/labels.json"
+JSON_DIR = "data/labels"
 
 # Hyperparams
 IMG_SIZE = 224
