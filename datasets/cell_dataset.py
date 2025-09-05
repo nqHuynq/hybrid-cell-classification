@@ -12,7 +12,7 @@ import pandas as pd
 # =========================
 def cutmix(image, label, image2, label2, alpha=1.0):
     lam = np.random.beta(alpha, alpha)
-    H, W = image.size[1], image.size[0]  # (H,W) trong PIL
+    H, W = image.size[1], image.size[0]  
     cx = np.random.randint(W)
     cy = np.random.randint(H)
     w = int(W * np.sqrt(1 - lam))
@@ -49,8 +49,6 @@ class CellDataset(Dataset):
         self.split = split
         self.apply_cutmix = apply_cutmix
         self.rare_indices = rare_indices if rare_indices is not None else []
-
-        # Khởi tạo img_paths và labels
         self.img_paths = [os.path.join(img_dir, fname + ".jpg") for fname in labels_df.index]
         self.labels = labels_df.values.astype("float32")
         self.num_classes = self.labels.shape[1]
@@ -62,7 +60,6 @@ class CellDataset(Dataset):
         img = Image.open(self.img_paths[idx]).convert("RGB")
         label = self.labels[idx]
 
-        # Áp dụng CutMix cho nhãn hiếm
         if self.apply_cutmix and idx in self.rare_indices and random.random() < 0.5:
             idx2 = random.randint(0, len(self.img_paths) - 1)
             img2 = Image.open(self.img_paths[idx2]).convert("RGB")
