@@ -1,10 +1,6 @@
 # hybrid-cell-classification
 Official Implementation of "A Novel Expert-Annotated Single-Cell Dataset for Thyroid Cancer Diagnosis with Deep Learning Benchmarks"
 
-## 📂 Dataset
-The dataset can be visited at:  
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17035305.svg)](https://doi.org/10.5281/zenodo.17035305)
-
 ## 🚀 Usage
 
 ```bash
