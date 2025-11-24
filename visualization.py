@@ -10,11 +10,10 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 from huggingface_hub import hf_hub_download
 
-# ================= CẤU HÌNH (CONFIG) =================
+# ================= CONFIG & PATHS =================
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path: sys.path.append(ROOT_DIR)
 
-# Tự động tìm Dataset
 DATASET_DIR = None
 possible_paths = [
     os.path.join(os.path.dirname(ROOT_DIR), "Dataset"), 
@@ -26,12 +25,12 @@ for path in possible_paths:
         DATASET_DIR = path
         break
 
-if not DATASET_DIR: 
-    DATASET_DIR = os.path.join(ROOT_DIR, "Dataset")
+if not DATASET_DIR: DATASET_DIR = os.path.join(ROOT_DIR, "Dataset")
 
 IMG_DIR = os.path.join(DATASET_DIR, "images")
 CNT_DIR = os.path.join(DATASET_DIR, "contour")
 OUT_DIR = os.path.join(DATASET_DIR, "output", "final_visualization")
+JSON_OUT_DIR = os.path.join(DATASET_DIR, "output", "json_results")
 
 HF_ID = "SoftmaxSamurai/ConvNext_SCTC"
 HF_FILE = "best_model.pth"
@@ -40,21 +39,19 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMG_SIZE = 224
 
 WEIGHTS = np.array([1, 3, 4, 1, 2, 1, 3, 1, 2])
-# BGR Colors
-COLORS = {"High": (0, 0, 255), "Med": (0, 165, 255), "Low": (255, 255, 0)} 
+COLORS = {
+    "High": (0, 0, 255),    # Red
+    "Med": (0, 165, 255),   # Orange
+    "Low": (255, 255, 0),   # Cyan
+    "Seg": (0, 255, 0)      # Green
+}
 
 try:
     from models.convnext_model import get_convnext_model
     from utils.transforms import get_basic_transform
 except ImportError: pass
 
-# ================= UTILS =================
-def bgr_to_hex(bgr):
-    """Chuyển màu BGR (OpenCV) sang Hex (Tkinter)."""
-    b, g, r = bgr
-    return f'#{r:02x}{g:02x}{b:02x}'
-
-# ================= LOGIC XỬ LÝ =================
+# ================= BACKEND LOGIC =================
 
 def load_model():
     print(f"--- Loading Model ({DEVICE}) ---")
@@ -116,8 +113,8 @@ def preprocess_cell(img, contour):
 
 def analyze_image(img_id, progress_callback=None):
     f_img, f_json = get_files(img_id)
-    if not f_img: return None, "Không tìm thấy ảnh gốc.", None
-    if not f_json: return None, "Không tìm thấy file contour JSON.", None
+    if not f_img: return None, "Image not found.", None, None
+    if not f_json: return None, "Contour JSON not found.", None, None
 
     try:
         model, thresholds = load_model()
@@ -130,13 +127,15 @@ def analyze_image(img_id, progress_callback=None):
             jdata = json.load(f)
             contours = list(jdata.values()) if isinstance(jdata, dict) else jdata
             
-        analysis_results = []
-        total = len(contours)
+        vis_data = []
+        export_data = {}
         
+        total = len(contours)
         for i, item in enumerate(contours):
             if progress_callback: progress_callback(i, total)
             
             pts = item.get('points') or item.get('contour')
+            cell_id = item.get('id', i)
             if not pts: continue
             cnt = np.array(pts, dtype=np.int32)
             
@@ -146,138 +145,96 @@ def analyze_image(img_id, progress_callback=None):
                 preds = (torch.sigmoid(model(t)) > thresholds).int().cpu().numpy()[0]
             
             score = np.dot(preds, WEIGHTS)
-            if preds[2] == 1 or score >= 7: lvl = "High"
+            
+            if preds[2] == 1: lvl = "High"
+            elif score >= 7: lvl = "High"
             elif score >= 5: lvl = "Med"
             else: lvl = "Low"
             
-            analysis_results.append({'contour': cnt, 'risk': lvl})
+            vis_data.append({'contour': cnt, 'risk': lvl, 'score': float(score)})
+            export_data[f"cell_{cell_id}"] = {"contour": pts, "features": preds.tolist()}
             
-        return img_clean, "Success", analysis_results
+        vis_data.sort(key=lambda x: x['score'], reverse=True)
+        return img_clean, "Success", vis_data, export_data
         
     except Exception as e:
-        return None, str(e), None
+        return None, str(e), None, None
 
 # ================= GUI CLASSES =================
-
-class StatRow(tk.Frame):
-    """Widget hiển thị một dòng thống kê với chấm màu."""
-    def __init__(self, parent, color_hex, label_text, initial_value=0):
-        super().__init__(parent)
-        self.color = color_hex
-        
-        # Chấm tròn màu
-        self.canvas = tk.Canvas(self, width=20, height=20, highlightthickness=0)
-        self.canvas.pack(side=tk.LEFT, padx=(0, 5))
-        # Vẽ hình tròn có viền đen
-        self.canvas.create_oval(2, 2, 18, 18, fill=color_hex, outline="black")
-        
-        # Label text
-        self.lbl_text = tk.Label(self, text=label_text, font=("Arial", 11))
-        self.lbl_text.pack(side=tk.LEFT)
-        
-        # Label giá trị
-        self.lbl_val = tk.Label(self, text=str(initial_value), font=("Arial", 11, "bold"))
-        self.lbl_val.pack(side=tk.RIGHT, padx=(5, 0))
-
-    def update_value(self, val):
-        self.lbl_val.config(text=str(val))
 
 class ResultWindow:
     def __init__(self, parent, img_clean, analysis_data, img_name):
         self.top = tk.Toplevel(parent)
-        self.top.title(f"Kết quả: {img_name}")
+        self.top.title(f"Analysis Result: {img_name}")
         self.top.geometry("1200x800")
         
         self.img_clean = img_clean
         self.analysis_data = analysis_data
         self.current_vis_cv2 = None 
         
-        self.show_high = tk.BooleanVar(value=True)
-        self.show_med = tk.BooleanVar(value=True)
-        self.show_low = tk.BooleanVar(value=True)
+        # Biến điều khiển:
+        # - show_segmentation (Hiển thị tất cả contour nền): Mặc định BẬT
+        # - show_key_cells (Hiển thị các tế bào quan trọng): Mặc định BẬT
+        self.show_segmentation = tk.BooleanVar(value=True)
+        self.show_key_cells = tk.BooleanVar(value=True)
         
-        # --- Layout ---
-        main_pane = tk.PanedWindow(self.top, orient=tk.HORIZONTAL)
+        # Layout
+        main_pane = tk.PanedWindow(self.top, orient=tk.HORIZONTAL, sashwidth=4)
         main_pane.pack(fill=tk.BOTH, expand=True)
         
-        self.frame_img = tk.Frame(main_pane, bg="black")
+        self.frame_img = tk.Frame(main_pane, bg="#202020")
         main_pane.add(self.frame_img, stretch="always")
         
-        self.lbl_img = tk.Label(self.frame_img, bg="black")
+        self.lbl_img = tk.Label(self.frame_img, bg="#202020")
         self.lbl_img.pack(fill=tk.BOTH, expand=True)
         
-        self.frame_ctrl = tk.Frame(main_pane, width=320, padx=20, pady=20)
+        self.frame_ctrl = tk.Frame(main_pane, width=300, padx=20, pady=20)
         main_pane.add(self.frame_ctrl, stretch="never")
         
-        # --- Điều khiển ---
-        tk.Label(self.frame_ctrl, text="BỘ LỌC HIỂN THỊ", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
+        tk.Label(self.frame_ctrl, text="VISUALIZATION CONTROLS", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 15))
         
-        group_filter = tk.LabelFrame(self.frame_ctrl, text="Tùy chọn", padx=10, pady=10)
-        group_filter.pack(fill=tk.X, pady=5)
+        # Toggles Group
+        group_layers = tk.LabelFrame(self.frame_ctrl, text="Display Layers", padx=15, pady=10)
+        group_layers.pack(fill=tk.X, pady=5)
         
-        tk.Checkbutton(group_filter, text="Nguy hiểm cao (Đỏ)", var=self.show_high, 
-                       font=("Arial", 10), fg="red", command=self.refresh_image).pack(anchor="w")
-        tk.Checkbutton(group_filter, text="Cảnh báo (Cam)", var=self.show_med, 
-                       font=("Arial", 10), fg="#FF8C00", command=self.refresh_image).pack(anchor="w")
-        tk.Checkbutton(group_filter, text="An toàn (Xanh)", var=self.show_low, 
-                       font=("Arial", 10), fg="blue", command=self.refresh_image).pack(anchor="w")
-        
-        ttk.Separator(self.frame_ctrl, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
-        
-        # --- Thống kê Số lượng (Giao diện mới) ---
-        tk.Label(self.frame_ctrl, text="THỐNG KÊ SỐ LƯỢNG:", font=("Arial", 12, "bold")).pack(anchor="w", pady=(0, 10))
-        
-        self.frame_stats = tk.Frame(self.frame_ctrl)
-        self.frame_stats.pack(fill=tk.X)
-        
-        # Tạo các dòng thống kê với màu sắc chuẩn
-        self.row_high = StatRow(self.frame_stats, bgr_to_hex(COLORS["High"]), "Đỏ (Cao):")
-        self.row_high.pack(fill=tk.X, pady=2)
-        
-        self.row_med = StatRow(self.frame_stats, bgr_to_hex(COLORS["Med"]), "Cam (Vừa):")
-        self.row_med.pack(fill=tk.X, pady=2)
-        
-        self.row_low = StatRow(self.frame_stats, bgr_to_hex(COLORS["Low"]), "Xanh (Thấp):")
-        self.row_low.pack(fill=tk.X, pady=2)
-        
-        # Đường gạch ngang tổng kết
-        tk.Label(self.frame_stats, text="-----------------------------", fg="gray").pack(fill=tk.X)
-        
-        # Dòng tổng cộng
-        self.frame_total = tk.Frame(self.frame_stats)
-        self.frame_total.pack(fill=tk.X, pady=5)
-        tk.Label(self.frame_total, text="Tổng cộng:", font=("Arial", 12)).pack(side=tk.LEFT)
-        self.lbl_total_val = tk.Label(self.frame_total, text="0", font=("Arial", 12, "bold"))
-        self.lbl_total_val.pack(side=tk.RIGHT)
+        # 1. Segmentation Mask (Hiển thị trước/ưu tiên hiển thị)
+        tk.Checkbutton(group_layers, text="Segmentation Mask", 
+                       var=self.show_segmentation, font=("Segoe UI", 10), fg="#388e3c",
+                       command=self.refresh_image).pack(anchor="w", pady=2)
+
+        # 2. Key Diagnostic Cells (Hiển thị sau/đè lên)
+        tk.Checkbutton(group_layers, text="Key Diagnostic Cells", 
+                       var=self.show_key_cells, font=("Segoe UI", 10, "bold"), fg="#d32f2f",
+                       command=self.refresh_image).pack(anchor="w", pady=2)
         
         # Save Button
-        btn_save = tk.Button(self.frame_ctrl, text="Lưu Ảnh Kết Quả", font=("Arial", 11, "bold"), 
-                             bg="#4CAF50", fg="white", height=2, command=self.save_current_view)
+        btn_save = tk.Button(self.frame_ctrl, text="Export Image", font=("Segoe UI", 11), 
+                             bg="#0078d4", fg="white", relief=tk.FLAT, padx=10, pady=5,
+                             command=self.save_current_view)
         btn_save.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
 
-        self.refresh_image()
+        self.top.after(100, self.refresh_image)
 
     def refresh_image(self):
+        if self.img_clean is None: return
+
+        # Luôn bắt đầu từ ảnh gốc sạch
         vis_img = self.img_clean.copy()
-        counts = {'High': 0, 'Med': 0, 'Low': 0}
         
-        for item in self.analysis_data:
-            risk = item['risk']
-            counts[risk] += 1
-            
-            should_draw = False
-            if risk == 'High' and self.show_high.get(): should_draw = True
-            elif risk == 'Med' and self.show_med.get(): should_draw = True
-            elif risk == 'Low' and self.show_low.get(): should_draw = True
-            
-            if should_draw:
-                cv2.drawContours(vis_img, [item['contour']], -1, COLORS[risk], 2)
-        
-        # Cập nhật số liệu thống kê lên UI mới
-        self.row_high.update_value(counts['High'])
-        self.row_med.update_value(counts['Med'])
-        self.row_low.update_value(counts['Low'])
-        self.lbl_total_val.config(text=str(len(self.analysis_data)))
+        # Layer 1: Segmentation Mask (Vẽ trước, nằm dưới)
+        if self.show_segmentation.get():
+            all_contours = [x['contour'] for x in self.analysis_data]
+            cv2.drawContours(vis_img, all_contours, -1, COLORS["Seg"], 1)
+
+        # Layer 2: Key Diagnostic Cells (Vẽ sau, đè lên trên)
+        if self.show_key_cells.get():
+            # Lấy Top 10 (đã sort)
+            key_list = self.analysis_data[:10]
+            for item in key_list:
+                risk = item['risk']
+                cnt = item['contour']
+                # Vẽ đậm hơn (thickness=2) để nổi bật trên nền segmentation
+                cv2.drawContours(vis_img, [cnt], -1, COLORS[risk], 2)
         
         self.current_vis_cv2 = vis_img
         self.display_cv2_image(vis_img)
@@ -286,65 +243,77 @@ class ResultWindow:
         img_rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(img_rgb)
         
-        w_win = self.frame_img.winfo_width() or 800
-        h_win = self.frame_img.winfo_height() or 600
+        w_win = self.frame_img.winfo_width()
+        h_win = self.frame_img.winfo_height()
+        
+        if w_win <= 1: w_win = 800
+        if h_win <= 1: h_win = 600
         
         w_img, h_img = pil_img.size
         if w_img > 0 and h_img > 0:
             ratio = min(w_win/w_img, h_win/h_img)
-            new_size = (int(w_img*ratio), int(h_img*ratio))
-            if new_size[0] > 0 and new_size[1] > 0:
-                pil_img = pil_img.resize(new_size, Image.LANCZOS)
+            ratio = min(ratio, 1.5) 
+            
+            new_w = int(w_img * ratio)
+            new_h = int(h_img * ratio)
+            
+            if new_w > 0 and new_h > 0:
+                pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
             
         photo = ImageTk.PhotoImage(pil_img)
         self.lbl_img.config(image=photo)
         self.lbl_img.image = photo
 
     def save_current_view(self):
-        path = os.path.join(OUT_DIR, "Saved_View.jpg")
+        path = os.path.join(OUT_DIR, "Exported_View.jpg")
         os.makedirs(OUT_DIR, exist_ok=True)
         if self.current_vis_cv2 is not None:
             cv2.imwrite(path, self.current_vis_cv2)
-            messagebox.showinfo("Đã lưu", f"Đã lưu ảnh tại:\n{path}")
+            messagebox.showinfo("Export Success", f"Image saved to:\n{path}")
 
 class CancerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Cancer Cell Visualization Tool")
-        self.root.geometry("600x500")
+        self.root.title("Thyroid Cancer Diagnosis Assistant")
+        self.root.geometry("650x550")
         
-        tk.Label(root, text="HỆ THỐNG CHẨN ĐOÁN TẾ BÀO UNG THƯ", font=("Arial", 18, "bold"), pady=15).pack()
+        style = ttk.Style()
+        style.theme_use('clam')
         
-        frame_content = tk.Frame(root, padx=20)
+        tk.Label(root, text="THYROID CANCER DIAGNOSIS SYSTEM", font=("Segoe UI", 18, "bold"), pady=20, fg="#2c3e50").pack()
+        
+        frame_content = tk.Frame(root, padx=30)
         frame_content.pack(fill=tk.BOTH, expand=True)
         
-        tk.Label(frame_content, text="Chọn ảnh bệnh phẩm:", font=("Arial", 12)).pack(anchor="w")
+        tk.Label(frame_content, text="Select Biopsy Image:", font=("Segoe UI", 11)).pack(anchor="w")
         
-        frame_list = tk.Frame(frame_content)
+        frame_list = tk.Frame(frame_content, bd=1, relief=tk.SUNKEN)
         frame_list.pack(fill=tk.BOTH, expand=True, pady=5)
         
         scrollbar = tk.Scrollbar(frame_list)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.listbox = tk.Listbox(frame_list, font=("Arial", 11), height=10, yscrollcommand=scrollbar.set)
+        self.listbox = tk.Listbox(frame_list, font=("Consolas", 11), height=12, 
+                                  yscrollcommand=scrollbar.set, bd=0, activestyle="none")
         self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.listbox.yview)
         
         self.load_image_list()
         
-        self.btn_run = tk.Button(root, text="BẮT ĐẦU PHÂN TÍCH", font=("Arial", 12, "bold"), 
-                                 bg="#007acc", fg="white", height=2, command=self.run_analysis)
-        self.btn_run.pack(fill=tk.X, padx=50, pady=20)
+        self.btn_run = tk.Button(root, text="START ANALYSIS", font=("Segoe UI", 12, "bold"), 
+                                 bg="#0078d4", fg="white", height=2, relief=tk.FLAT,
+                                 command=self.run_analysis)
+        self.btn_run.pack(fill=tk.X, padx=60, pady=25)
         
         self.progress = ttk.Progressbar(root, orient=tk.HORIZONTAL, length=100, mode='determinate')
-        self.progress.pack(fill=tk.X, padx=20)
+        self.progress.pack(fill=tk.X, padx=30)
         
-        self.lbl_status = tk.Label(root, text="Sẵn sàng", fg="gray")
+        self.lbl_status = tk.Label(root, text="Ready", fg="gray", font=("Segoe UI", 9))
         self.lbl_status.pack(pady=5)
 
     def load_image_list(self):
         if not os.path.exists(IMG_DIR):
-            self.listbox.insert(tk.END, "Lỗi: Không tìm thấy thư mục images!")
+            self.listbox.insert(tk.END, "Error: Image directory not found.")
             return
         files = sorted([os.path.splitext(f)[0] for f in os.listdir(IMG_DIR) if f.lower().endswith(('.jpg', '.png', '.jpeg'))])
         for f in files: self.listbox.insert(tk.END, f)
@@ -352,33 +321,39 @@ class CancerApp:
     def run_analysis(self):
         selection = self.listbox.curselection()
         if not selection:
-            messagebox.showwarning("Chưa chọn ảnh", "Vui lòng chọn một ảnh!")
+            messagebox.showwarning("Selection Required", "Please select an image from the list.")
             return
         img_id = self.listbox.get(selection[0])
-        self.btn_run.config(state=tk.DISABLED, text="Đang xử lý...", bg="#cccccc")
+        self.btn_run.config(state=tk.DISABLED, text="PROCESSING...", bg="#cccccc")
         self.progress['value'] = 0
         threading.Thread(target=self.process_thread, args=(img_id,)).start()
 
     def process_thread(self, img_id):
-        self.update_status(f"Đang tải model và xử lý {img_id}...")
+        self.update_status(f"Loading model & analyzing {img_id}...")
         def progress_cb(curr, total):
             pct = (curr / total) * 100
             self.root.after(0, lambda: self.progress.configure(value=pct))
-            self.root.after(0, lambda: self.update_status(f"Đang phân tích: {curr}/{total}"))
-        img_clean, msg, results = analyze_image(img_id, progress_cb)
-        self.root.after(0, lambda: self.finish_analysis(img_clean, msg, results, img_id))
+            self.root.after(0, lambda: self.update_status(f"Analyzing cells: {curr}/{total}"))
+        
+        img_clean, msg, vis_data, export_data = analyze_image(img_id, progress_cb)
+        self.root.after(0, lambda: self.finish_analysis(img_clean, msg, vis_data, export_data, img_id))
 
     def update_status(self, text): self.lbl_status.config(text=text)
 
-    def finish_analysis(self, img_clean, msg, results, img_id):
-        self.btn_run.config(state=tk.NORMAL, text="BẮT ĐẦU PHÂN TÍCH", bg="#007acc")
+    def finish_analysis(self, img_clean, msg, vis_data, export_data, img_id):
+        self.btn_run.config(state=tk.NORMAL, text="START ANALYSIS", bg="#0078d4")
         self.progress['value'] = 100
+        
         if img_clean is not None:
-            self.update_status("Hoàn tất!")
-            ResultWindow(self.root, img_clean, results, img_id)
+            self.update_status("Completed successfully.")
+            os.makedirs(JSON_OUT_DIR, exist_ok=True)
+            json_path = os.path.join(JSON_OUT_DIR, f"{img_id}_detailed_results.json")
+            with open(json_path, 'w') as f: json.dump({img_id: export_data}, f, indent=4)
+            print(f"JSON exported: {json_path}")
+            ResultWindow(self.root, img_clean, vis_data, img_id)
         else:
-            self.update_status("Lỗi!")
-            messagebox.showerror("Lỗi", msg)
+            self.update_status("Failed.")
+            messagebox.showerror("Processing Error", msg)
 
 if __name__ == "__main__":
     try:
@@ -387,5 +362,5 @@ if __name__ == "__main__":
         app = CancerApp(root)
         root.mainloop()
     except ImportError:
-        print("Lỗi: Hãy chạy từ thư mục gốc của repo.")
-        input("Enter...")
+        print("Error: Please run from the repository root directory.")
+        input("Enter to exit...")
